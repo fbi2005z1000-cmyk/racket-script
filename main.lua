@@ -26,6 +26,7 @@ local CONFIG = {
     MY_COURT_CENTER = Vector3.new(0, 0, 0),
     MY_COURT_RADIUS = 85,
     ONLY_MY_COURT = true,
+    DEBUG_IGNORE_COURT_CHECK = true,
     AUTO_TRACK_COURT_CENTER = true,
     COURT_CENTER_UPDATE_DELAY = 0.3,
     ENEMY_BALL_LOG_DELAY = 1.0,
@@ -169,6 +170,10 @@ end
 
 local function now()
     return os.clock()
+end
+
+local function shouldIgnoreCourtCheck()
+    return CONFIG.DEBUG_IGNORE_COURT_CHECK == true
 end
 
 local function updateCourtCenterFromCharacter()
@@ -518,7 +523,7 @@ function getSafeCourtPositionNearBall(ball)
     end
 
     local bp = ball.Position
-    if CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(bp)) then
+    if (not shouldIgnoreCourtCheck()) and CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(bp)) then
         return nil
     end
 
@@ -534,7 +539,7 @@ function getBallTargetCFrame(ball)
     end
     local forward = getForwardUnit()
     local target = ball.Position - (forward * CONFIG.BALL_FOLLOW_DISTANCE) + Vector3.new(0, CONFIG.BALL_HEIGHT_OFFSET, 0)
-    if CONFIG.ONLY_TELEPORT_INSIDE_COURT then
+    if (not shouldIgnoreCourtCheck()) and CONFIG.ONLY_TELEPORT_INSIDE_COURT then
         target = clampToMyCourt(target)
     end
     local lookPos = ball.Position + (forward * 8)
@@ -579,7 +584,7 @@ function smartFindBall()
             return
         end
 
-        if CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(part.Position)) and (not isBallOnMyCourt(part)) then
+        if (not shouldIgnoreCourtCheck()) and CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(part.Position)) and (not isBallOnMyCourt(part)) then
             return
         end
 
@@ -632,7 +637,7 @@ function smartFindBall()
                     local vel = obj.AssemblyLinearVelocity.Magnitude
                     local sizeMag = obj.Size.Magnitude
                     if vel >= 35 and sizeMag <= 10 then
-                        if CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(obj.Position)) and (not isBallOnMyCourt(obj)) then
+                        if (not shouldIgnoreCourtCheck()) and CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(obj.Position)) and (not isBallOnMyCourt(obj)) then
                             continue
                         end
                         local score = vel * 2 + (CONFIG.FALLBACK_BALL_DISTANCE - dist)
@@ -677,7 +682,7 @@ function moveToBall(ball)
     if not ball or not ball:IsA("BasePart") then
         return
     end
-    if CONFIG.ONLY_MY_COURT and (not isBallOnMyCourt(ball)) then
+    if (not shouldIgnoreCourtCheck()) and CONFIG.ONLY_MY_COURT and (not isBallOnMyCourt(ball)) then
         return
     end
     local humanoid = getHumanoid()
@@ -712,7 +717,7 @@ function safeTeleportToBall(ball)
         return false
     end
 
-    if CONFIG.ONLY_MY_COURT and not isBallOnMyCourt(ball) then
+    if (not shouldIgnoreCourtCheck()) and CONFIG.ONLY_MY_COURT and not isBallOnMyCourt(ball) then
         throttledLog("ball_enemy_zone", "Cau dang o san doi thu - dung yen", CONFIG.ENEMY_BALL_LOG_DELAY)
         return false
     end
@@ -1176,33 +1181,31 @@ function mainLoop()
                     local ball, dist = smartFindBall()
 
                     if ball then
-                        local ballOnMyCourt = isBallOnMyCourt(ball)
-
-                        if CONFIG.ONLY_MY_COURT and (not ballOnMyCourt) then
-                            throttledLog("ball_enemy_hold", "Cau dang o san doi thu - dung yen", CONFIG.ENEMY_BALL_LOG_DELAY)
-                            return
-                        end
-
                         state.lastBallSeen = t
-                        throttledLog("ball_found", "Tim thay cau: " .. ball.Name .. " | dist=" .. string.format("%.1f", dist), 0.5)
+                        throttledLog("ball_found", "Ball found: " .. ball.Name .. " dist=" .. tostring(math.floor(dist)), 0.2)
 
-                        if state.toggles.TeleportToBall and (t - state.lastTeleport >= CONFIG.TELEPORT_DELAY) then
-                            state.lastTeleport = t
-                            safeTeleportToBall(ball)
-                        elseif state.toggles.AutoBall and (not state.toggles.TeleportToBall) then
+                        if state.toggles.TeleportToBall then
+                            if t - state.lastTeleport >= CONFIG.TELEPORT_DELAY then
+                                state.lastTeleport = t
+                                local okTp = safeTeleportToBall(ball)
+                                if okTp then
+                                    throttledLog("ball_action_tp", "Dang TeleportToBall", 0.25)
+                                end
+                            end
+                        elseif state.toggles.AutoBall then
                             moveToBall(ball)
+                            throttledLog("ball_action_move", "Dang MoveToBall", 0.25)
                         end
 
-                        if state.toggles.AutoJumpHit and (t - state.lastJump >= CONFIG.JUMP_DELAY) then
-                            state.lastJump = t
+                        if state.toggles.AutoJumpHit then
                             jumpHitBall()
                         end
 
-                        if state.toggles.FastHit or state.toggles.AutoBall then
+                        if state.toggles.FastHit then
                             fastHitBall()
                         end
                     else
-                        throttledLog("ball_missing", "chua tim thay cau", 1.0)
+                        throttledLog("ball_missing", "Khong tim thay cau", 0.8)
                     end
                 end
 
@@ -1232,3 +1235,4 @@ createUI()
 autoReloadOnTeleport()
 mainLoop()
 log("Script da khoi dong")
+
