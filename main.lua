@@ -22,6 +22,10 @@ local CONFIG = {
     MY_COURT_CENTER = Vector3.new(0, 0, 0),
     MY_COURT_RADIUS = 85,
     ONLY_MY_COURT = true,
+    AUTO_TRACK_COURT_CENTER = true,
+    COURT_CENTER_UPDATE_DELAY = 0.3,
+    ENEMY_BALL_LOG_DELAY = 1.0,
+    FALLBACK_BALL_DISTANCE = 70,
 
     MY_COURT_MIN = Vector3.new(-50, 0, -80),
     MY_COURT_MAX = Vector3.new(50, 0, 20),
@@ -88,19 +92,20 @@ local state = {
     lastFastHit = 0,
     lastTest = 0,
     lastBallSeen = 0,
+    lastCourtSync = 0,
     toggles = {
-        AutoBall = false,
-        AutoJumpHit = false,
+        AutoBall = true,
+        AutoJumpHit = true,
         AutoCharge = false,
-        AutoSkill = false,
+        AutoSkill = true,
         AutoQuest = false,
         AutoJoin = false,
         AutoReload = CONFIG.AUTO_RELOAD,
         TestMode = false,
         AutoSelectMode = true,
         AutoFindMatch = true,
-        FastHit = false,
-        TeleportToBall = false
+        FastHit = true,
+        TeleportToBall = true
     }
 }
 
@@ -158,6 +163,25 @@ end
 
 local function now()
     return os.clock()
+end
+
+local function updateCourtCenterFromCharacter()
+    if not CONFIG.AUTO_TRACK_COURT_CENTER then
+        return
+    end
+    local t = now()
+    if t - state.lastCourtSync < CONFIG.COURT_CENTER_UPDATE_DELAY then
+        return
+    end
+    state.lastCourtSync = t
+
+    local root = getRoot()
+    if not root then
+        return
+    end
+
+    -- Chi dong bo theo mat phang san (XZ), giu nguyen Y tu config.
+    CONFIG.MY_COURT_CENTER = Vector3.new(root.Position.X, CONFIG.MY_COURT_CENTER.Y, root.Position.Z)
 end
 
 local function tapKey(keyName, holdTime)
@@ -467,7 +491,9 @@ function isBallOnMyCourt(ball)
     if not ball or not ball:IsA("BasePart") then
         return false
     end
-    local d = (ball.Position - CONFIG.MY_COURT_CENTER).Magnitude
+    local bxz = Vector3.new(ball.Position.X, 0, ball.Position.Z)
+    local cxz = Vector3.new(CONFIG.MY_COURT_CENTER.X, 0, CONFIG.MY_COURT_CENTER.Z)
+    local d = (bxz - cxz).Magnitude
     return d <= CONFIG.MY_COURT_RADIUS
 end
 
@@ -478,7 +504,9 @@ function getSafeCourtPositionNearBall(ball)
 
     local bp = ball.Position
     if CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(bp)) then
-        return nil
+        if not isBallOnMyCourt(ball) then
+            return nil
+        end
     end
 
     local target = bp + Vector3.new(0, CONFIG.SAFE_Y_OFFSET, CONFIG.FOLLOW_BACK_DISTANCE)
@@ -562,6 +590,27 @@ function smartFindBall()
     end
 
     if not bestPart then
+        -- Fallback: neu ten khong giong "ball", uu tien vat the nho + bay nhanh + gan nhan vat.
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                local dist = (obj.Position - root.Position).Magnitude
+                if dist <= CONFIG.FALLBACK_BALL_DISTANCE then
+                    local vel = obj.AssemblyLinearVelocity.Magnitude
+                    local sizeMag = obj.Size.Magnitude
+                    if vel >= 20 and sizeMag <= 15 then
+                        local score = vel * 2 + (CONFIG.FALLBACK_BALL_DISTANCE - dist)
+                        if score > bestScore then
+                            bestScore = score
+                            bestPart = obj
+                            bestDist = dist
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if not bestPart then
         local folder = workspace:FindFirstChild(CONFIG.BALL_FOLDER_NAME)
         if folder then
             for _, obj in ipairs(folder:GetDescendants()) do
@@ -585,11 +634,24 @@ function moveToBall(ball)
         return
     end
     local humanoid = getHumanoid()
+    local root = getRoot()
     if not humanoid then
         return
     end
+
+    if state.toggles.TeleportToBall then
+        return
+    end
+
     pcall(function()
-        humanoid:MoveTo(ball.Position)
+        humanoid.WalkSpeed = math.max(humanoid.WalkSpeed, 70)
+        local dist = root and (ball.Position - root.Position).Magnitude or 0
+        if root and dist > 20 then
+            local dashPos = ball.Position + Vector3.new(0, 2, -3)
+            root.CFrame = CFrame.new(dashPos, ball.Position)
+        else
+            humanoid:MoveTo(ball.Position)
+        end
     end)
 end
 
@@ -603,7 +665,7 @@ function safeTeleportToBall(ball)
     end
 
     if CONFIG.ONLY_MY_COURT and not isBallOnMyCourt(ball) then
-        throttledLog("ball_enemy_zone", "Cau dang o san doi thu - dung yen", 1.0)
+        throttledLog("ball_enemy_zone", "Cau dang o san doi thu - dung yen", CONFIG.ENEMY_BALL_LOG_DELAY)
         return false
     end
 
@@ -614,7 +676,7 @@ function safeTeleportToBall(ball)
 
     local safePos = getSafeCourtPositionNearBall(ball)
     if safePos == nil then
-        throttledLog("ball_outside_court", "Cau ngoai san minh - khong teleport", 1.0)
+        throttledLog("ball_outside_court", "Cau ngoai san minh - khong teleport", CONFIG.ENEMY_BALL_LOG_DELAY)
         return false
     end
 
@@ -779,6 +841,17 @@ function autoReloadOnTeleport()
             log("moi truong khong ho tro queue_on_teleport")
         end
     end)
+end
+
+local function normalizeRuntimeToggles()
+    -- Neu file save cu tat het, bat lai bo toi thieu de tranh dung im.
+    if (not state.toggles.AutoBall) and (not state.toggles.TeleportToBall) and (not state.toggles.FastHit) then
+        state.toggles.AutoBall = true
+        state.toggles.TeleportToBall = true
+        state.toggles.FastHit = true
+        state.toggles.AutoJumpHit = true
+        state.toggles.AutoSkill = true
+    end
 end
 
 function createUI()
@@ -1018,6 +1091,7 @@ function mainLoop()
         log("Main loop dang chay")
         while state.running do
             pcall(function()
+                updateCourtCenterFromCharacter()
                 local t = now()
                 local inMatch = isInMatch()
 
@@ -1051,7 +1125,7 @@ function mainLoop()
                         local ballOnMyCourt = isBallOnMyCourt(ball)
 
                         if CONFIG.ONLY_MY_COURT and (not ballOnMyCourt) then
-                            throttledLog("ball_enemy_hold", "Cau dang o san doi thu - dung yen", 1.0)
+                            throttledLog("ball_enemy_hold", "Cau dang o san doi thu - dung yen", CONFIG.ENEMY_BALL_LOG_DELAY)
                             return
                         end
 
@@ -1070,7 +1144,7 @@ function mainLoop()
                             jumpHitBall()
                         end
 
-                        if state.toggles.FastHit then
+                        if state.toggles.FastHit or state.toggles.AutoBall then
                             fastHitBall()
                         end
                     else
@@ -1083,7 +1157,7 @@ function mainLoop()
                     chargePower()
                 end
 
-                if state.toggles.AutoSkill and (t - state.lastSkill >= CONFIG.SKILL_INTERVAL) then
+                if state.toggles.AutoSkill and (not state.toggles.FastHit) and (t - state.lastSkill >= CONFIG.SKILL_INTERVAL) then
                     state.lastSkill = t
                     useSkill()
                 end
@@ -1099,6 +1173,7 @@ function mainLoop()
 end
 
 loadConfig()
+normalizeRuntimeToggles()
 createUI()
 autoReloadOnTeleport()
 mainLoop()
