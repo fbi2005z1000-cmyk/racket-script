@@ -6,21 +6,38 @@ local CONFIG = {
     SKILL_KEYS = {"Q", "E", "R"},
     CHARGE_KEY = "F",
     SWING_KEY = "MouseButton1",
-    LOOP_DELAY = 0.15,
-    SKILL_INTERVAL = 2.5,
-    FAST_HIT_DELAY = 0.08,
-    BALL_SCAN_DELAY = 0.05,
-    TELEPORT_DELAY = 0.08,
+
+    LOOP_DELAY = 0.01,
+    SKILL_INTERVAL = 0.5,
+    FAST_HIT_DELAY = 0.016,
+    BALL_SCAN_DELAY = 0.01,
+    TELEPORT_DELAY = 0.016,
+    JUMP_DELAY = 0.07,
+    CHARGE_DELAY = 0.24,
+
     BALL_OFFSET = Vector3.new(0, 2, -2),
+    BALL_FOLLOW_DISTANCE = 4,
+    BALL_HEIGHT_OFFSET = 2,
+
+    MY_COURT_CENTER = Vector3.new(0, 0, 0),
+    MY_COURT_RADIUS = 85,
+    ONLY_MY_COURT = true,
+
+    MY_COURT_MIN = Vector3.new(-50, 0, -80),
+    MY_COURT_MAX = Vector3.new(50, 0, 20),
+    SAFE_Y_OFFSET = 3,
+    FOLLOW_BACK_DISTANCE = 3,
+    ONLY_TELEPORT_INSIDE_COURT = true,
+
     AUTO_RELOAD = true,
     SELECTED_MODE = "2v2",
     MODES = {"Rank 2v2", "Rank 1v1", "3v3", "2v2", "1v1"},
+
     JOIN_DELAY = 1.2,
     MODE_DELAY = 1.0,
     FIND_DELAY = 1.0,
     QUEST_DELAY = 4.0,
-    JUMP_DELAY = 0.35,
-    CHARGE_DELAY = 1.2,
+
     LOG_LIMIT = 11,
     MAX_BALL_DISTANCE = 350
 }
@@ -69,7 +86,6 @@ local state = {
     lastFind = 0,
     lastTeleport = 0,
     lastFastHit = 0,
-    lastSwing = 0,
     lastTest = 0,
     lastBallSeen = 0,
     toggles = {
@@ -168,7 +184,7 @@ local function clickMouseLeft()
     local y = math.floor(vp.Y * 0.5)
     local ok = pcall(function()
         VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
-        task.wait(0.02)
+        task.wait(0.008)
         VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
     end)
     return ok
@@ -426,6 +442,61 @@ function clickFindMatch()
     return ok
 end
 
+function isInsideMyCourt(pos)
+    return pos.X >= CONFIG.MY_COURT_MIN.X
+        and pos.X <= CONFIG.MY_COURT_MAX.X
+        and pos.Z >= CONFIG.MY_COURT_MIN.Z
+        and pos.Z <= CONFIG.MY_COURT_MAX.Z
+end
+
+function clampToMyCourt(pos)
+    local root = getRoot()
+    local y = pos.Y
+    if root then
+        y = root.Position.Y + CONFIG.SAFE_Y_OFFSET
+    else
+        y = y + CONFIG.SAFE_Y_OFFSET
+    end
+
+    local clampedX = math.clamp(pos.X, CONFIG.MY_COURT_MIN.X, CONFIG.MY_COURT_MAX.X)
+    local clampedZ = math.clamp(pos.Z, CONFIG.MY_COURT_MIN.Z, CONFIG.MY_COURT_MAX.Z)
+    return Vector3.new(clampedX, y, clampedZ)
+end
+
+function isBallOnMyCourt(ball)
+    if not ball or not ball:IsA("BasePart") then
+        return false
+    end
+    local d = (ball.Position - CONFIG.MY_COURT_CENTER).Magnitude
+    return d <= CONFIG.MY_COURT_RADIUS
+end
+
+function getSafeCourtPositionNearBall(ball)
+    if not ball or not ball:IsA("BasePart") then
+        return nil
+    end
+
+    local bp = ball.Position
+    if CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(bp)) then
+        return nil
+    end
+
+    local target = bp + Vector3.new(0, CONFIG.SAFE_Y_OFFSET, CONFIG.FOLLOW_BACK_DISTANCE)
+    target = clampToMyCourt(target)
+    return target
+end
+
+function getBallTargetCFrame(ball)
+    if not ball or not ball:IsA("BasePart") then
+        return nil
+    end
+    local target = ball.Position + Vector3.new(0, CONFIG.BALL_HEIGHT_OFFSET, -CONFIG.BALL_FOLLOW_DISTANCE)
+    if CONFIG.ONLY_TELEPORT_INSIDE_COURT then
+        target = clampToMyCourt(target)
+    end
+    return CFrame.new(target, ball.Position)
+end
+
 function smartFindBall()
     local root = getRoot()
     if not root then
@@ -440,10 +511,11 @@ function smartFindBall()
         if not part or not part:IsA("BasePart") then
             return
         end
-        local n = safeLower(ownerName .. " " .. part.Name)
+
+        local combinedName = safeLower(ownerName .. " " .. part.Name)
         local nameMatched = false
         for _, hint in ipairs(BALL_NAME_HINTS) do
-            if string.find(n, hint, 1, true) then
+            if string.find(combinedName, hint, 1, true) then
                 nameMatched = true
                 break
             end
@@ -459,15 +531,16 @@ function smartFindBall()
 
         local vel = part.AssemblyLinearVelocity.Magnitude
         local sizeMag = part.Size.Magnitude
-        local yDiff = math.abs(part.Position.Y - root.Position.Y)
-        local inCourtHint = yDiff <= 70 and dist <= CONFIG.MAX_BALL_DISTANCE
+        if sizeMag > 30 then
+            return
+        end
 
         local score = 0
-        score = score + (200 - math.min(dist, 200))
-        score = score + math.min(vel, 120)
-        score = score + (35 - math.min(sizeMag, 35))
-        if inCourtHint then
-            score = score + 20
+        score = score + math.min(vel * 3, 300)
+        score = score + (220 - math.min(dist, 220))
+        score = score + (40 - math.min(sizeMag, 40))
+        if vel > 3 then
+            score = score + 100
         end
 
         if score > bestScore then
@@ -521,17 +594,39 @@ function moveToBall(ball)
 end
 
 function teleportToBall(ball)
+    return safeTeleportToBall(ball)
+end
+
+function safeTeleportToBall(ball)
     if not ball or not ball:IsA("BasePart") then
-        return
+        return false
     end
+
+    if CONFIG.ONLY_MY_COURT and not isBallOnMyCourt(ball) then
+        throttledLog("ball_enemy_zone", "Cau dang o san doi thu - dung yen", 1.0)
+        return false
+    end
+
     local root = getRoot()
     if not root then
-        return
+        return false
     end
+
+    local safePos = getSafeCourtPositionNearBall(ball)
+    if safePos == nil then
+        throttledLog("ball_outside_court", "Cau ngoai san minh - khong teleport", 1.0)
+        return false
+    end
+
+    local targetCf = getBallTargetCFrame(ball)
+    if not targetCf then
+        targetCf = CFrame.new(safePos, ball.Position)
+    end
+
     pcall(function()
-        local targetPos = (ball.CFrame * CFrame.new(CONFIG.BALL_OFFSET)).Position
-        root.CFrame = CFrame.new(targetPos, ball.Position)
+        root.CFrame = targetCf
     end)
+    return true
 end
 
 function jumpHitBall()
@@ -545,7 +640,7 @@ function jumpHitBall()
 end
 
 function chargePower()
-    local ok = tapKey(CONFIG.CHARGE_KEY, 0.08)
+    local ok = tapKey(CONFIG.CHARGE_KEY, 0.04)
     if not ok then
         throttledLog("charge_key_invalid", "Charge key khong hop le", 1.2)
     end
@@ -556,7 +651,7 @@ function useSkill()
         return
     end
     local key = CONFIG.SKILL_KEYS[state.skillIndex]
-    local ok = tapKey(key, 0.06)
+    local ok = tapKey(key, 0.03)
     if ok then
         throttledLog("skill_use_" .. tostring(key), "Dang dung skill: " .. tostring(key), 0.5)
     else
@@ -572,7 +667,7 @@ function spamSwing()
     if CONFIG.SWING_KEY == "MouseButton1" then
         clickMouseLeft()
     else
-        tapKey(CONFIG.SWING_KEY, 0.02)
+        tapKey(CONFIG.SWING_KEY, 0.01)
     end
 end
 
@@ -582,10 +677,12 @@ function fastHitBall()
         return
     end
     state.lastFastHit = t
+
     pcall(function()
         spamSwing()
     end)
-    if t - state.lastSkill >= CONFIG.SKILL_INTERVAL then
+
+    if state.toggles.AutoSkill and t - state.lastSkill >= CONFIG.SKILL_INTERVAL then
         state.lastSkill = t
         pcall(function()
             useSkill()
@@ -949,14 +1046,22 @@ function mainLoop()
                 if (state.toggles.AutoBall or state.toggles.TeleportToBall or state.toggles.FastHit) and (t - state.lastBall >= CONFIG.BALL_SCAN_DELAY) then
                     state.lastBall = t
                     local ball, dist = smartFindBall()
+
                     if ball then
+                        local ballOnMyCourt = isBallOnMyCourt(ball)
+
+                        if CONFIG.ONLY_MY_COURT and (not ballOnMyCourt) then
+                            throttledLog("ball_enemy_hold", "Cau dang o san doi thu - dung yen", 1.0)
+                            return
+                        end
+
                         state.lastBallSeen = t
-                        throttledLog("ball_found", "Tim thay cau: " .. ball.Name .. " | dist=" .. string.format("%.1f", dist), 0.35)
+                        throttledLog("ball_found", "Tim thay cau: " .. ball.Name .. " | dist=" .. string.format("%.1f", dist), 0.5)
 
                         if state.toggles.TeleportToBall and (t - state.lastTeleport >= CONFIG.TELEPORT_DELAY) then
                             state.lastTeleport = t
-                            teleportToBall(ball)
-                        elseif state.toggles.AutoBall then
+                            safeTeleportToBall(ball)
+                        elseif state.toggles.AutoBall and (not state.toggles.TeleportToBall) then
                             moveToBall(ball)
                         end
 
