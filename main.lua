@@ -18,6 +18,10 @@ local CONFIG = {
     BALL_OFFSET = Vector3.new(0, 2, -2),
     BALL_FOLLOW_DISTANCE = 4,
     BALL_HEIGHT_OFFSET = 2,
+    FORWARD_HIT_DIRECTION = Vector3.new(0, 0, -1),
+    MAX_TELEPORT_STEP = 35,
+    STICK_TO_LAST_BALL = true,
+    LAST_BALL_TIMEOUT = 1.5,
 
     MY_COURT_CENTER = Vector3.new(0, 0, 0),
     MY_COURT_RADIUS = 85,
@@ -92,6 +96,8 @@ local state = {
     lastFastHit = 0,
     lastTest = 0,
     lastBallSeen = 0,
+    lastBallLockAt = 0,
+    lastBallRef = nil,
     lastCourtSync = 0,
     toggles = {
         AutoBall = true,
@@ -182,6 +188,15 @@ local function updateCourtCenterFromCharacter()
 
     -- Chi dong bo theo mat phang san (XZ), giu nguyen Y tu config.
     CONFIG.MY_COURT_CENTER = Vector3.new(root.Position.X, CONFIG.MY_COURT_CENTER.Y, root.Position.Z)
+end
+
+local function getForwardUnit()
+    local v = CONFIG.FORWARD_HIT_DIRECTION
+    local flat = Vector3.new(v.X, 0, v.Z)
+    if flat.Magnitude < 0.001 then
+        return Vector3.new(0, 0, -1)
+    end
+    return flat.Unit
 end
 
 local function tapKey(keyName, holdTime)
@@ -504,12 +519,11 @@ function getSafeCourtPositionNearBall(ball)
 
     local bp = ball.Position
     if CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(bp)) then
-        if not isBallOnMyCourt(ball) then
-            return nil
-        end
+        return nil
     end
 
-    local target = bp + Vector3.new(0, CONFIG.SAFE_Y_OFFSET, CONFIG.FOLLOW_BACK_DISTANCE)
+    local forward = getForwardUnit()
+    local target = bp - (forward * CONFIG.FOLLOW_BACK_DISTANCE) + Vector3.new(0, CONFIG.SAFE_Y_OFFSET, 0)
     target = clampToMyCourt(target)
     return target
 end
@@ -518,11 +532,13 @@ function getBallTargetCFrame(ball)
     if not ball or not ball:IsA("BasePart") then
         return nil
     end
-    local target = ball.Position + Vector3.new(0, CONFIG.BALL_HEIGHT_OFFSET, -CONFIG.BALL_FOLLOW_DISTANCE)
+    local forward = getForwardUnit()
+    local target = ball.Position - (forward * CONFIG.BALL_FOLLOW_DISTANCE) + Vector3.new(0, CONFIG.BALL_HEIGHT_OFFSET, 0)
     if CONFIG.ONLY_TELEPORT_INSIDE_COURT then
         target = clampToMyCourt(target)
     end
-    return CFrame.new(target, ball.Position)
+    local lookPos = ball.Position + (forward * 8)
+    return CFrame.new(target, lookPos)
 end
 
 function smartFindBall()
@@ -535,7 +551,7 @@ function smartFindBall()
     local bestDist = math.huge
     local bestScore = -math.huge
 
-    local function tryPart(part, ownerName)
+    local function tryPart(part, ownerName, extraScore)
         if not part or not part:IsA("BasePart") then
             return
         end
@@ -563,6 +579,11 @@ function smartFindBall()
             return
         end
 
+        if CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(part.Position)) and (not isBallOnMyCourt(part)) then
+            return
+        end
+
+        extraScore = extraScore or 0
         local score = 0
         score = score + math.min(vel * 3, 300)
         score = score + (220 - math.min(dist, 220))
@@ -570,11 +591,24 @@ function smartFindBall()
         if vel > 3 then
             score = score + 100
         end
+        score = score + extraScore
 
         if score > bestScore then
             bestScore = score
             bestPart = part
             bestDist = dist
+        end
+    end
+
+    if CONFIG.STICK_TO_LAST_BALL and state.lastBallRef and state.lastBallRef.Parent and state.lastBallRef:IsA("BasePart") then
+        local held = state.lastBallRef
+        local heldDist = (held.Position - root.Position).Magnitude
+        if heldDist <= CONFIG.MAX_BALL_DISTANCE then
+            local bonus = 500
+            if now() - state.lastBallLockAt <= CONFIG.LAST_BALL_TIMEOUT then
+                bonus = bonus + 300
+            end
+            tryPart(held, held.Name, bonus)
         end
     end
 
@@ -597,7 +631,10 @@ function smartFindBall()
                 if dist <= CONFIG.FALLBACK_BALL_DISTANCE then
                     local vel = obj.AssemblyLinearVelocity.Magnitude
                     local sizeMag = obj.Size.Magnitude
-                    if vel >= 20 and sizeMag <= 15 then
+                    if vel >= 35 and sizeMag <= 10 then
+                        if CONFIG.ONLY_TELEPORT_INSIDE_COURT and (not isInsideMyCourt(obj.Position)) and (not isBallOnMyCourt(obj)) then
+                            continue
+                        end
                         local score = vel * 2 + (CONFIG.FALLBACK_BALL_DISTANCE - dist)
                         if score > bestScore then
                             bestScore = score
@@ -621,6 +658,13 @@ function smartFindBall()
         end
     end
 
+    if bestPart then
+        state.lastBallRef = bestPart
+        state.lastBallLockAt = now()
+    elseif state.lastBallRef and (now() - state.lastBallLockAt > CONFIG.LAST_BALL_TIMEOUT) then
+        state.lastBallRef = nil
+    end
+
     return bestPart, bestDist
 end
 
@@ -631,6 +675,9 @@ end
 
 function moveToBall(ball)
     if not ball or not ball:IsA("BasePart") then
+        return
+    end
+    if CONFIG.ONLY_MY_COURT and (not isBallOnMyCourt(ball)) then
         return
     end
     local humanoid = getHumanoid()
@@ -646,8 +693,9 @@ function moveToBall(ball)
     pcall(function()
         humanoid.WalkSpeed = math.max(humanoid.WalkSpeed, 70)
         local dist = root and (ball.Position - root.Position).Magnitude or 0
+        local forward = getForwardUnit()
         if root and dist > 20 then
-            local dashPos = ball.Position + Vector3.new(0, 2, -3)
+            local dashPos = ball.Position - (forward * 3) + Vector3.new(0, 2, 0)
             root.CFrame = CFrame.new(dashPos, ball.Position)
         else
             humanoid:MoveTo(ball.Position)
@@ -686,6 +734,12 @@ function safeTeleportToBall(ball)
     end
 
     pcall(function()
+        local targetPos = targetCf.Position
+        local delta = targetPos - root.Position
+        if delta.Magnitude > CONFIG.MAX_TELEPORT_STEP then
+            targetPos = root.Position + delta.Unit * CONFIG.MAX_TELEPORT_STEP
+            targetCf = CFrame.new(targetPos, targetPos + getForwardUnit())
+        end
         root.CFrame = targetCf
     end)
     return true
