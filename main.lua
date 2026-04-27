@@ -1,19 +1,48 @@
 local CONFIG = {
-    SOURCE_URL = "https://raw.githubusercontent.com/username/repo/main/main.lua",
+    SOURCE_URL = "https://raw.githubusercontent.com/fbi2005z1000-cmyk/racket-script/refs/heads/main/main.lua",
     BALL_FOLDER_NAME = "DienTenFolderChuaCau",
     QUEST_NPC_NAME = "DienTenNPCNhiemVu",
     MATCH_BUTTON_NAME = "DienTenNutVaoTran",
     SKILL_KEYS = {"Q", "E", "R"},
     CHARGE_KEY = "F",
+    SWING_KEY = "MouseButton1",
     LOOP_DELAY = 0.15,
     SKILL_INTERVAL = 2.5,
-    AUTO_RELOAD = true
+    FAST_HIT_DELAY = 0.08,
+    BALL_SCAN_DELAY = 0.05,
+    TELEPORT_DELAY = 0.08,
+    BALL_OFFSET = Vector3.new(0, 2, -2),
+    AUTO_RELOAD = true,
+    SELECTED_MODE = "2v2",
+    MODES = {"Rank 2v2", "Rank 1v1", "3v3", "2v2", "1v1"},
+    JOIN_DELAY = 1.2,
+    MODE_DELAY = 1.0,
+    FIND_DELAY = 1.0,
+    QUEST_DELAY = 4.0,
+    JUMP_DELAY = 0.35,
+    CHARGE_DELAY = 1.2,
+    LOG_LIMIT = 11,
+    MAX_BALL_DISTANCE = 350
 }
+
+local MODE_TEXT_MAP = {
+    ["Rank 2v2"] = {"Xep hang 2v2", "XepHang2v2", "Rank 2v2", "rank 2v2"},
+    ["Rank 1v1"] = {"Xep hang 1v1", "XepHang1v1", "Rank 1v1", "rank 1v1"},
+    ["3v3"] = {"3 v 3", "3v3"},
+    ["2v2"] = {"2 v 2", "2v2"},
+    ["1v1"] = {"1 v 1", "1v1"}
+}
+
+local PLAY_TEXTS = {"PLAY", "Play"}
+local FIND_MATCH_TEXTS = {"Tim tran dau", "Find Match", "Find"}
+local BALL_NAME_HINTS = {"ball", "shuttle", "projectile", "orb", "cau", "tennis"}
+local CONFIG_FILE = "racket_helper_config.json"
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
@@ -28,6 +57,7 @@ local state = {
     running = true,
     ui = {},
     logs = {},
+    logTick = {},
     skillIndex = 1,
     lastBall = 0,
     lastJump = 0,
@@ -35,7 +65,13 @@ local state = {
     lastSkill = 0,
     lastQuest = 0,
     lastJoin = 0,
+    lastMode = 0,
+    lastFind = 0,
+    lastTeleport = 0,
+    lastFastHit = 0,
+    lastSwing = 0,
     lastTest = 0,
+    lastBallSeen = 0,
     toggles = {
         AutoBall = false,
         AutoJumpHit = false,
@@ -44,7 +80,11 @@ local state = {
         AutoQuest = false,
         AutoJoin = false,
         AutoReload = CONFIG.AUTO_RELOAD,
-        TestMode = false
+        TestMode = false,
+        AutoSelectMode = true,
+        AutoFindMatch = true,
+        FastHit = false,
+        TeleportToBall = false
     }
 }
 
@@ -55,9 +95,9 @@ if getgenv then
     end
     g.__SAFE_RACKET_HELPER_STOP = function()
         state.running = false
-        local old1 = CoreGui:FindFirstChild(UI_NAME)
-        if old1 then
-            old1:Destroy()
+        local oldGui = CoreGui:FindFirstChild(UI_NAME)
+        if oldGui then
+            oldGui:Destroy()
         end
     end
 end
@@ -86,6 +126,24 @@ local function getRoot()
     return c:FindFirstChild("HumanoidRootPart")
 end
 
+local function safeLower(v)
+    if typeof(v) ~= "string" then
+        return ""
+    end
+    return string.lower(v)
+end
+
+local function normalizeText(v)
+    local s = safeLower(v)
+    s = s:gsub("%s+", "")
+    s = s:gsub("[%p%c]", "")
+    return s
+end
+
+local function now()
+    return os.clock()
+end
+
 local function tapKey(keyName, holdTime)
     local keyCode = Enum.KeyCode[keyName]
     if not keyCode then
@@ -100,16 +158,98 @@ local function tapKey(keyName, holdTime)
     return ok
 end
 
+local function clickMouseLeft()
+    local cam = workspace.CurrentCamera
+    if not cam then
+        return false
+    end
+    local vp = cam.ViewportSize
+    local x = math.floor(vp.X * 0.5)
+    local y = math.floor(vp.Y * 0.5)
+    local ok = pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+        task.wait(0.02)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+    end)
+    return ok
+end
+
 function log(msg)
     local ts = os.date("%H:%M:%S")
     local line = "[" .. ts .. "] " .. tostring(msg)
     print("[Helper] " .. tostring(msg))
     table.insert(state.logs, 1, line)
-    while #state.logs > 10 do
+    while #state.logs > CONFIG.LOG_LIMIT do
         table.remove(state.logs)
     end
     if state.ui.status then
         state.ui.status.Text = table.concat(state.logs, "\n")
+    end
+end
+
+local function throttledLog(key, msg, delay)
+    local t = now()
+    local last = state.logTick[key] or 0
+    if t - last >= delay then
+        state.logTick[key] = t
+        log(msg)
+    end
+end
+
+function saveConfig()
+    local payload = {
+        SELECTED_MODE = CONFIG.SELECTED_MODE,
+        toggles = state.toggles
+    }
+    if getgenv then
+        pcall(function()
+            getgenv().__RACKET_HELPER_SAVED = payload
+        end)
+    end
+    if writefile and HttpService then
+        pcall(function()
+            writefile(CONFIG_FILE, HttpService:JSONEncode(payload))
+        end)
+    end
+end
+
+function loadConfig()
+    if getgenv then
+        local ok, cached = pcall(function()
+            return getgenv().__RACKET_HELPER_SAVED
+        end)
+        if ok and type(cached) == "table" then
+            if type(cached.SELECTED_MODE) == "string" then
+                CONFIG.SELECTED_MODE = cached.SELECTED_MODE
+            end
+            if type(cached.toggles) == "table" then
+                for k, v in pairs(cached.toggles) do
+                    if state.toggles[k] ~= nil and type(v) == "boolean" then
+                        state.toggles[k] = v
+                    end
+                end
+            end
+        end
+    end
+    if readfile and isfile then
+        pcall(function()
+            if isfile(CONFIG_FILE) then
+                local raw = readfile(CONFIG_FILE)
+                local decoded = HttpService:JSONDecode(raw)
+                if type(decoded) == "table" then
+                    if type(decoded.SELECTED_MODE) == "string" then
+                        CONFIG.SELECTED_MODE = decoded.SELECTED_MODE
+                    end
+                    if type(decoded.toggles) == "table" then
+                        for k, v in pairs(decoded.toggles) do
+                            if state.toggles[k] ~= nil and type(v) == "boolean" then
+                                state.toggles[k] = v
+                            end
+                        end
+                    end
+                end
+            end
+        end)
     end
 end
 
@@ -120,8 +260,8 @@ end
 
 local function addToggleRow(parent, y, labelText, keyName)
     local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, -14, 0, 26)
-    row.Position = UDim2.new(0, 7, 0, y)
+    row.Size = UDim2.new(1, -10, 0, 26)
+    row.Position = UDim2.new(0, 5, 0, y)
     row.BackgroundTransparency = 1
     row.Parent = parent
 
@@ -148,7 +288,399 @@ local function addToggleRow(parent, y, labelText, keyName)
     btn.MouseButton1Click:Connect(function()
         state.toggles[keyName] = not state.toggles[keyName]
         setToggleButtonStyle(btn, state.toggles[keyName])
+        saveConfig()
         log(labelText .. " = " .. (state.toggles[keyName] and "ON" or "OFF"))
+    end)
+end
+
+function findGuiButtonByText(textList)
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui or type(textList) ~= "table" then
+        return nil
+    end
+
+    local normalizedTargets = {}
+    for _, t in ipairs(textList) do
+        local nt = normalizeText(t)
+        if nt ~= "" then
+            table.insert(normalizedTargets, nt)
+        end
+    end
+
+    local function scoreText(candidate)
+        local n = normalizeText(candidate)
+        if n == "" then
+            return -1
+        end
+        local best = -1
+        for _, target in ipairs(normalizedTargets) do
+            if n == target then
+                best = math.max(best, 1000)
+            elseif string.find(n, target, 1, true) then
+                best = math.max(best, 700)
+            elseif string.find(target, n, 1, true) then
+                best = math.max(best, 500)
+            end
+        end
+        return best
+    end
+
+    local bestButton = nil
+    local bestScore = -1
+
+    for _, obj in ipairs(playerGui:GetDescendants()) do
+        local candidateButton = nil
+        local candidateScore = -1
+
+        if obj:IsA("TextButton") then
+            candidateButton = obj
+            candidateScore = scoreText(obj.Text)
+        elseif obj:IsA("ImageButton") then
+            candidateButton = obj
+            for _, d in ipairs(obj:GetDescendants()) do
+                if d:IsA("TextLabel") or d:IsA("TextButton") then
+                    candidateScore = math.max(candidateScore, scoreText(d.Text))
+                end
+            end
+        elseif obj:IsA("TextLabel") and obj.Parent and obj.Parent:IsA("GuiButton") then
+            candidateButton = obj.Parent
+            candidateScore = scoreText(obj.Text)
+        end
+
+        if candidateButton and candidateButton.Visible and candidateScore > bestScore then
+            bestScore = candidateScore
+            bestButton = candidateButton
+        end
+    end
+
+    return bestButton
+end
+
+function clickGuiButton(button)
+    if not button then
+        return false
+    end
+    local okActivate = pcall(function()
+        if button:IsA("GuiButton") then
+            button:Activate()
+        end
+    end)
+    if okActivate then
+        return true
+    end
+    local okClick = pcall(function()
+        local pos = button.AbsolutePosition
+        local size = button.AbsoluteSize
+        local x = math.floor(pos.X + size.X * 0.5)
+        local y = math.floor(pos.Y + size.Y * 0.5)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+        task.wait(0.02)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+    end)
+    return okClick
+end
+
+function clickPlayButton()
+    local btn = findGuiButtonByText(PLAY_TEXTS)
+    if not btn then
+        throttledLog("play_not_found", "Khong tim thay nut PLAY", 1.0)
+        return false
+    end
+    local ok = clickGuiButton(btn)
+    if ok then
+        log("Da bam PLAY")
+    else
+        throttledLog("play_click_fail", "Khong bam duoc nut PLAY", 1.0)
+    end
+    return ok
+end
+
+function selectGameMode(modeName)
+    local targets = MODE_TEXT_MAP[modeName] or {modeName}
+    local btn = findGuiButtonByText(targets)
+    if not btn then
+        throttledLog("mode_not_found_" .. tostring(modeName), "Khong tim thay mode: " .. tostring(modeName), 1.0)
+        return false
+    end
+    local ok = clickGuiButton(btn)
+    if ok then
+        log("Da chon mode: " .. tostring(modeName))
+    else
+        throttledLog("mode_click_fail_" .. tostring(modeName), "Khong bam duoc mode: " .. tostring(modeName), 1.0)
+    end
+    return ok
+end
+
+function clickFindMatch()
+    local btn = findGuiButtonByText(FIND_MATCH_TEXTS)
+    if not btn then
+        throttledLog("find_not_found", "Khong tim thay nut Tim tran dau", 1.0)
+        return false
+    end
+    local ok = clickGuiButton(btn)
+    if ok then
+        log("Da bam Tim tran dau")
+    else
+        throttledLog("find_click_fail", "Khong bam duoc Tim tran dau", 1.0)
+    end
+    return ok
+end
+
+function smartFindBall()
+    local root = getRoot()
+    if not root then
+        return nil, math.huge
+    end
+
+    local bestPart = nil
+    local bestDist = math.huge
+    local bestScore = -math.huge
+
+    local function tryPart(part, ownerName)
+        if not part or not part:IsA("BasePart") then
+            return
+        end
+        local n = safeLower(ownerName .. " " .. part.Name)
+        local nameMatched = false
+        for _, hint in ipairs(BALL_NAME_HINTS) do
+            if string.find(n, hint, 1, true) then
+                nameMatched = true
+                break
+            end
+        end
+        if not nameMatched then
+            return
+        end
+
+        local dist = (part.Position - root.Position).Magnitude
+        if dist > CONFIG.MAX_BALL_DISTANCE then
+            return
+        end
+
+        local vel = part.AssemblyLinearVelocity.Magnitude
+        local sizeMag = part.Size.Magnitude
+        local yDiff = math.abs(part.Position.Y - root.Position.Y)
+        local inCourtHint = yDiff <= 70 and dist <= CONFIG.MAX_BALL_DISTANCE
+
+        local score = 0
+        score = score + (200 - math.min(dist, 200))
+        score = score + math.min(vel, 120)
+        score = score + (35 - math.min(sizeMag, 35))
+        if inCourtHint then
+            score = score + 20
+        end
+
+        if score > bestScore then
+            bestScore = score
+            bestPart = part
+            bestDist = dist
+        end
+    end
+
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            tryPart(obj, obj.Name)
+        elseif obj:IsA("Model") then
+            local p = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+            if p then
+                tryPart(p, obj.Name)
+            end
+        end
+    end
+
+    if not bestPart then
+        local folder = workspace:FindFirstChild(CONFIG.BALL_FOLDER_NAME)
+        if folder then
+            for _, obj in ipairs(folder:GetDescendants()) do
+                if obj:IsA("BasePart") then
+                    tryPart(obj, obj.Name)
+                end
+            end
+        end
+    end
+
+    return bestPart, bestDist
+end
+
+function findBall()
+    local part, _ = smartFindBall()
+    return part
+end
+
+function moveToBall(ball)
+    if not ball or not ball:IsA("BasePart") then
+        return
+    end
+    local humanoid = getHumanoid()
+    if not humanoid then
+        return
+    end
+    pcall(function()
+        humanoid:MoveTo(ball.Position)
+    end)
+end
+
+function teleportToBall(ball)
+    if not ball or not ball:IsA("BasePart") then
+        return
+    end
+    local root = getRoot()
+    if not root then
+        return
+    end
+    pcall(function()
+        local targetPos = (ball.CFrame * CFrame.new(CONFIG.BALL_OFFSET)).Position
+        root.CFrame = CFrame.new(targetPos, ball.Position)
+    end)
+end
+
+function jumpHitBall()
+    local humanoid = getHumanoid()
+    if not humanoid then
+        return
+    end
+    pcall(function()
+        humanoid.Jump = true
+    end)
+end
+
+function chargePower()
+    local ok = tapKey(CONFIG.CHARGE_KEY, 0.08)
+    if not ok then
+        throttledLog("charge_key_invalid", "Charge key khong hop le", 1.2)
+    end
+end
+
+function useSkill()
+    if #CONFIG.SKILL_KEYS == 0 then
+        return
+    end
+    local key = CONFIG.SKILL_KEYS[state.skillIndex]
+    local ok = tapKey(key, 0.06)
+    if ok then
+        throttledLog("skill_use_" .. tostring(key), "Dang dung skill: " .. tostring(key), 0.5)
+    else
+        throttledLog("skill_invalid_" .. tostring(key), "Skill key khong hop le: " .. tostring(key), 1.0)
+    end
+    state.skillIndex = state.skillIndex + 1
+    if state.skillIndex > #CONFIG.SKILL_KEYS then
+        state.skillIndex = 1
+    end
+end
+
+function spamSwing()
+    if CONFIG.SWING_KEY == "MouseButton1" then
+        clickMouseLeft()
+    else
+        tapKey(CONFIG.SWING_KEY, 0.02)
+    end
+end
+
+function fastHitBall()
+    local t = now()
+    if t - state.lastFastHit < CONFIG.FAST_HIT_DELAY then
+        return
+    end
+    state.lastFastHit = t
+    pcall(function()
+        spamSwing()
+    end)
+    if t - state.lastSkill >= CONFIG.SKILL_INTERVAL then
+        state.lastSkill = t
+        pcall(function()
+            useSkill()
+        end)
+    end
+end
+
+function acceptQuest()
+    local npc = workspace:FindFirstChild(CONFIG.QUEST_NPC_NAME)
+    if npc then
+        throttledLog("quest_found", "Tim thay NPC nhiem vu: " .. npc.Name, 2.0)
+    else
+        throttledLog("quest_not_found", "Chua tim thay NPC nhiem vu", 2.0)
+    end
+end
+
+function collectReward()
+    throttledLog("collect_reward", "collectReward placeholder dang chay", 2.0)
+end
+
+function joinMatch()
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then
+        throttledLog("join_no_gui", "Khong co PlayerGui", 1.0)
+        return
+    end
+    local button = playerGui:FindFirstChild(CONFIG.MATCH_BUTTON_NAME, true)
+    if button and (button:IsA("TextButton") or button:IsA("ImageButton")) then
+        local ok = clickGuiButton(button)
+        if ok then
+            log("Dang vao tran...")
+        else
+            throttledLog("join_click_fail", "Khong bam duoc nut vao tran", 1.0)
+        end
+    else
+        throttledLog("join_button_not_found", "Chua tim thay nut vao tran", 1.0)
+    end
+end
+
+function isInMatch()
+    local pAttr = LocalPlayer:GetAttribute(IN_MATCH_ATTR)
+    if typeof(pAttr) == "boolean" then
+        return pAttr
+    end
+    local wAttr = workspace:GetAttribute(IN_MATCH_ATTR)
+    if typeof(wAttr) == "boolean" then
+        return wAttr
+    end
+    if now() - state.lastBallSeen <= 1.8 then
+        return true
+    end
+    return false
+end
+
+function waitForMatch(timeoutSec)
+    timeoutSec = timeoutSec or 20
+    local t0 = now()
+    while now() - t0 < timeoutSec do
+        if isInMatch() then
+            return true
+        end
+        task.wait(0.25)
+    end
+    return false
+end
+
+function autoReloadOnTeleport()
+    LocalPlayer.OnTeleport:Connect(function(teleportState)
+        if teleportState ~= Enum.TeleportState.Started then
+            return
+        end
+        if not state.toggles.AutoReload then
+            return
+        end
+
+        saveConfig()
+
+        local queueFn = queue_on_teleport
+            or (syn and syn.queue_on_teleport)
+            or (fluxus and fluxus.queue_on_teleport)
+            or (krnl and krnl.queue_on_teleport)
+
+        if queueFn then
+            local code = 'loadstring(game:HttpGet("' .. tostring(CONFIG.SOURCE_URL) .. '"))()'
+            local ok, err = pcall(function()
+                queueFn(code)
+            end)
+            if ok then
+                log("Da queue auto reload khi teleport")
+            else
+                log("Queue that bai: " .. tostring(err))
+            end
+        else
+            log("moi truong khong ho tro queue_on_teleport")
+        end
     end)
 end
 
@@ -165,8 +697,8 @@ function createUI()
     gui.Parent = CoreGui
 
     local panel = Instance.new("Frame")
-    panel.Size = UDim2.new(0, 330, 0, 390)
-    panel.Position = UDim2.new(0, 20, 0.5, -195)
+    panel.Size = UDim2.new(0, 340, 0, 620)
+    panel.Position = UDim2.new(0, 20, 0.5, -310)
     panel.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
     panel.BorderSizePixel = 0
     panel.Parent = gui
@@ -227,7 +759,7 @@ function createUI()
     showCorner.Parent = showBtn
 
     local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -14, 0, 105)
+    status.Size = UDim2.new(1, -14, 0, 90)
     status.Position = UDim2.new(0, 7, 0, 42)
     status.BackgroundColor3 = Color3.fromRGB(20, 23, 28)
     status.BorderSizePixel = 0
@@ -243,15 +775,96 @@ function createUI()
     statusCorner.CornerRadius = UDim.new(0, 8)
     statusCorner.Parent = status
 
-    local startY = 155
-    addToggleRow(panel, startY + 0, "Auto Ball", "AutoBall")
-    addToggleRow(panel, startY + 28, "Auto Jump Hit", "AutoJumpHit")
-    addToggleRow(panel, startY + 56, "Auto Charge", "AutoCharge")
-    addToggleRow(panel, startY + 84, "Auto Skill", "AutoSkill")
-    addToggleRow(panel, startY + 112, "Auto Quest", "AutoQuest")
-    addToggleRow(panel, startY + 140, "Auto Join", "AutoJoin")
-    addToggleRow(panel, startY + 168, "Auto Reload", "AutoReload")
-    addToggleRow(panel, startY + 196, "Test Mode", "TestMode")
+    local body = Instance.new("ScrollingFrame")
+    body.Size = UDim2.new(1, -14, 1, -140)
+    body.Position = UDim2.new(0, 7, 0, 136)
+    body.BackgroundColor3 = Color3.fromRGB(24, 26, 32)
+    body.BorderSizePixel = 0
+    body.ScrollBarThickness = 6
+    body.CanvasSize = UDim2.new(0, 0, 0, 760)
+    body.Parent = panel
+
+    local bodyCorner = Instance.new("UICorner")
+    bodyCorner.CornerRadius = UDim.new(0, 8)
+    bodyCorner.Parent = body
+
+    local modeTitle = Instance.new("TextLabel")
+    modeTitle.Size = UDim2.new(1, -10, 0, 20)
+    modeTitle.Position = UDim2.new(0, 5, 0, 6)
+    modeTitle.BackgroundTransparency = 1
+    modeTitle.TextXAlignment = Enum.TextXAlignment.Left
+    modeTitle.Font = Enum.Font.GothamBold
+    modeTitle.TextSize = 13
+    modeTitle.TextColor3 = Color3.fromRGB(240, 240, 240)
+    modeTitle.Text = "Mode:"
+    modeTitle.Parent = body
+
+    local modeButton = Instance.new("TextButton")
+    modeButton.Size = UDim2.new(1, -10, 0, 26)
+    modeButton.Position = UDim2.new(0, 5, 0, 28)
+    modeButton.BackgroundColor3 = Color3.fromRGB(55, 63, 78)
+    modeButton.Font = Enum.Font.GothamBold
+    modeButton.TextSize = 12
+    modeButton.TextColor3 = Color3.new(1, 1, 1)
+    modeButton.Text = "Selected: " .. tostring(CONFIG.SELECTED_MODE)
+    modeButton.Parent = body
+
+    local modeButtonCorner = Instance.new("UICorner")
+    modeButtonCorner.CornerRadius = UDim.new(0, 6)
+    modeButtonCorner.Parent = modeButton
+
+    local optionsFrame = Instance.new("Frame")
+    optionsFrame.Size = UDim2.new(1, -10, 0, 130)
+    optionsFrame.Position = UDim2.new(0, 5, 0, 58)
+    optionsFrame.BackgroundColor3 = Color3.fromRGB(38, 43, 52)
+    optionsFrame.Visible = false
+    optionsFrame.Parent = body
+
+    local optionsCorner = Instance.new("UICorner")
+    optionsCorner.CornerRadius = UDim.new(0, 6)
+    optionsCorner.Parent = optionsFrame
+
+    for i, modeName in ipairs(CONFIG.MODES) do
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -8, 0, 22)
+        b.Position = UDim2.new(0, 4, 0, 4 + (i - 1) * 25)
+        b.BackgroundColor3 = Color3.fromRGB(70, 78, 95)
+        b.Font = Enum.Font.Gotham
+        b.TextSize = 12
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Text = modeName
+        b.Parent = optionsFrame
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 5)
+        c.Parent = b
+
+        b.MouseButton1Click:Connect(function()
+            CONFIG.SELECTED_MODE = modeName
+            modeButton.Text = "Selected: " .. tostring(CONFIG.SELECTED_MODE)
+            optionsFrame.Visible = false
+            saveConfig()
+            log("Da doi mode UI: " .. tostring(modeName))
+        end)
+    end
+
+    modeButton.MouseButton1Click:Connect(function()
+        optionsFrame.Visible = not optionsFrame.Visible
+    end)
+
+    local startY = 198
+    addToggleRow(body, startY + 0, "Auto Ball", "AutoBall")
+    addToggleRow(body, startY + 28, "Auto Jump Hit", "AutoJumpHit")
+    addToggleRow(body, startY + 56, "Auto Charge", "AutoCharge")
+    addToggleRow(body, startY + 84, "Auto Skill", "AutoSkill")
+    addToggleRow(body, startY + 112, "Auto Quest", "AutoQuest")
+    addToggleRow(body, startY + 140, "Auto Join", "AutoJoin")
+    addToggleRow(body, startY + 168, "Auto Reload", "AutoReload")
+    addToggleRow(body, startY + 196, "Test Mode", "TestMode")
+    addToggleRow(body, startY + 224, "Auto Select Mode", "AutoSelectMode")
+    addToggleRow(body, startY + 252, "Auto Find Match", "AutoFindMatch")
+    addToggleRow(body, startY + 280, "Fast Hit", "FastHit")
+    addToggleRow(body, startY + 308, "Teleport To Ball", "TeleportToBall")
 
     hideBtn.MouseButton1Click:Connect(function()
         panel.Visible = false
@@ -299,160 +912,8 @@ function createUI()
     state.ui.gui = gui
     state.ui.panel = panel
     state.ui.status = status
+    state.ui.modeButton = modeButton
     log("UI san sang")
-end
-
-function findBall()
-    local root = getRoot()
-    if not root then
-        return nil
-    end
-    local folder = workspace:FindFirstChild(CONFIG.BALL_FOLDER_NAME)
-    if not folder then
-        return nil
-    end
-
-    local nearestPart = nil
-    local nearestDist = math.huge
-    for _, obj in ipairs(folder:GetDescendants()) do
-        if obj:IsA("BasePart") then
-            local dist = (obj.Position - root.Position).Magnitude
-            if dist < nearestDist then
-                nearestDist = dist
-                nearestPart = obj
-            end
-        end
-    end
-    return nearestPart
-end
-
-function moveToBall(ball)
-    if not ball or not ball:IsA("BasePart") then
-        return
-    end
-    local humanoid = getHumanoid()
-    if not humanoid then
-        return
-    end
-    humanoid:MoveTo(ball.Position)
-end
-
-function jumpHitBall()
-    local humanoid = getHumanoid()
-    if not humanoid then
-        return
-    end
-    humanoid.Jump = true
-end
-
-function chargePower()
-    local ok = tapKey(CONFIG.CHARGE_KEY, 0.12)
-    if not ok then
-        log("Charge key khong hop le")
-    end
-end
-
-function useSkill()
-    if #CONFIG.SKILL_KEYS == 0 then
-        return
-    end
-    local key = CONFIG.SKILL_KEYS[state.skillIndex]
-    local ok = tapKey(key, 0.07)
-    if ok then
-        log("Dang dung skill: " .. tostring(key))
-    else
-        log("Skill key khong hop le: " .. tostring(key))
-    end
-    state.skillIndex = state.skillIndex + 1
-    if state.skillIndex > #CONFIG.SKILL_KEYS then
-        state.skillIndex = 1
-    end
-end
-
-function acceptQuest()
-    local npc = workspace:FindFirstChild(CONFIG.QUEST_NPC_NAME)
-    if npc then
-        log("Tim thay NPC nhiem vu: " .. npc.Name)
-    else
-        log("Chua tim thay NPC nhiem vu")
-    end
-end
-
-function collectReward()
-    log("collectReward placeholder dang chay")
-end
-
-function joinMatch()
-    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if not playerGui then
-        log("Khong co PlayerGui")
-        return
-    end
-    local button = playerGui:FindFirstChild(CONFIG.MATCH_BUTTON_NAME, true)
-    if button and (button:IsA("TextButton") or button:IsA("ImageButton")) then
-        local ok = pcall(function()
-            button:Activate()
-        end)
-        if ok then
-            log("Dang vao tran...")
-        else
-            log("Khong the Activate nut vao tran")
-        end
-    else
-        log("Chua tim thay nut vao tran")
-    end
-end
-
-function isInMatch()
-    local pAttr = LocalPlayer:GetAttribute(IN_MATCH_ATTR)
-    if typeof(pAttr) == "boolean" then
-        return pAttr
-    end
-    local wAttr = workspace:GetAttribute(IN_MATCH_ATTR)
-    if typeof(wAttr) == "boolean" then
-        return wAttr
-    end
-    if workspace:FindFirstChild(CONFIG.BALL_FOLDER_NAME) then
-        return true
-    end
-    return false
-end
-
-function waitForMatch(timeoutSec)
-    timeoutSec = timeoutSec or 20
-    local t0 = os.clock()
-    while os.clock() - t0 < timeoutSec do
-        if isInMatch() then
-            return true
-        end
-        task.wait(0.25)
-    end
-    return false
-end
-
-function autoReloadOnTeleport()
-    LocalPlayer.OnTeleport:Connect(function(teleportState)
-        if teleportState ~= Enum.TeleportState.Started then
-            return
-        end
-        if not state.toggles.AutoReload then
-            return
-        end
-        local queueFn = queue_on_teleport or (syn and syn.queue_on_teleport)
-        if queueFn then
-            local code = 'loadstring(game:HttpGet("' .. tostring(CONFIG.SOURCE_URL) .. '"))()'
-            local ok, err = pcall(function()
-                queueFn(code)
-            end)
-            if ok then
-                log("Da queue auto reload khi teleport")
-            else
-                log("Queue that bai: " .. tostring(err))
-            end
-        else
-            log("moi truong khong ho tro queue_on_teleport")
-        end
-    end)
 end
 
 function mainLoop()
@@ -460,51 +921,71 @@ function mainLoop()
         log("Main loop dang chay")
         while state.running do
             pcall(function()
-                local now = os.clock()
-                if state.toggles.AutoBall and now - state.lastBall >= 0.3 then
-                    state.lastBall = now
-                    local ball = findBall()
-                    if ball then
-                        log("Dang tim cau: " .. ball.Name)
-                        moveToBall(ball)
-                    else
-                        log("chua tim thay cau")
-                    end
+                local t = now()
+                local inMatch = isInMatch()
+
+                if state.toggles.AutoJoin and not inMatch and (t - state.lastJoin >= CONFIG.JOIN_DELAY) then
+                    state.lastJoin = t
+                    clickPlayButton()
+                    joinMatch()
                 end
 
-                if state.toggles.AutoJumpHit and now - state.lastJump >= 0.6 then
-                    state.lastJump = now
-                    log("Dang jump hit")
-                    jumpHitBall()
+                if state.toggles.AutoJoin and state.toggles.AutoSelectMode and not inMatch and (t - state.lastMode >= CONFIG.MODE_DELAY) then
+                    state.lastMode = t
+                    selectGameMode(CONFIG.SELECTED_MODE)
                 end
 
-                if state.toggles.AutoCharge and now - state.lastCharge >= 1.2 then
-                    state.lastCharge = now
-                    log("Dang charge")
-                    chargePower()
+                if state.toggles.AutoJoin and state.toggles.AutoFindMatch and not inMatch and (t - state.lastFind >= CONFIG.FIND_DELAY) then
+                    state.lastFind = t
+                    clickFindMatch()
                 end
 
-                if state.toggles.AutoSkill and now - state.lastSkill >= CONFIG.SKILL_INTERVAL then
-                    state.lastSkill = now
-                    useSkill()
-                end
-
-                if state.toggles.AutoQuest and now - state.lastQuest >= 4 then
-                    state.lastQuest = now
+                if state.toggles.AutoQuest and (t - state.lastQuest >= CONFIG.QUEST_DELAY) then
+                    state.lastQuest = t
                     acceptQuest()
                     collectReward()
                 end
 
-                if state.toggles.AutoJoin and now - state.lastJoin >= 2 then
-                    state.lastJoin = now
-                    if not isInMatch() then
-                        joinMatch()
+                if (state.toggles.AutoBall or state.toggles.TeleportToBall or state.toggles.FastHit) and (t - state.lastBall >= CONFIG.BALL_SCAN_DELAY) then
+                    state.lastBall = t
+                    local ball, dist = smartFindBall()
+                    if ball then
+                        state.lastBallSeen = t
+                        throttledLog("ball_found", "Tim thay cau: " .. ball.Name .. " | dist=" .. string.format("%.1f", dist), 0.35)
+
+                        if state.toggles.TeleportToBall and (t - state.lastTeleport >= CONFIG.TELEPORT_DELAY) then
+                            state.lastTeleport = t
+                            teleportToBall(ball)
+                        elseif state.toggles.AutoBall then
+                            moveToBall(ball)
+                        end
+
+                        if state.toggles.AutoJumpHit and (t - state.lastJump >= CONFIG.JUMP_DELAY) then
+                            state.lastJump = t
+                            jumpHitBall()
+                        end
+
+                        if state.toggles.FastHit then
+                            fastHitBall()
+                        end
+                    else
+                        throttledLog("ball_missing", "chua tim thay cau", 1.0)
                     end
                 end
 
-                if state.toggles.TestMode and now - state.lastTest >= 2 then
-                    state.lastTest = now
-                    log("Test Mode: loop OK | inMatch=" .. tostring(isInMatch()))
+                if state.toggles.AutoCharge and (t - state.lastCharge >= CONFIG.CHARGE_DELAY) then
+                    state.lastCharge = t
+                    chargePower()
+                end
+
+                if state.toggles.AutoSkill and (t - state.lastSkill >= CONFIG.SKILL_INTERVAL) then
+                    state.lastSkill = t
+                    useSkill()
+                end
+
+                if state.toggles.TestMode and (t - state.lastTest >= 2.0) then
+                    state.lastTest = t
+                    log("Test Mode: loop OK | inMatch=" .. tostring(inMatch) .. " | mode=" .. tostring(CONFIG.SELECTED_MODE))
                 end
             end)
             task.wait(CONFIG.LOOP_DELAY)
@@ -512,6 +993,7 @@ function mainLoop()
     end)
 end
 
+loadConfig()
 createUI()
 autoReloadOnTeleport()
 mainLoop()
